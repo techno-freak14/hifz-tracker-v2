@@ -28,13 +28,11 @@ A premium, high-performance web application designed to digitalize and streamlin
 
 ## 🛠️ Built With
 
-* **Frontend Framework:** HTML5, Tailwind CSS (Custom Soft Black Glassmorphic Theme)
-* **Typography:** Google Fonts (*Aref Ruqaa* for Arabic-style cursive calligraphy accents & *Plus Jakarta Sans* for clean data visibility)
-* **Iconography:** FontAwesome v6.4
-* **Database & State:** LocalStorage Core Engine (Persistent local session tracking)
-* **Core API:** Alquran.cloud REST API (Synchronized Audio/Text Data)
-
----
+* **Frontend Environment:** Plain HTML5, CSS3 (Tailwind utility styling), and Vanilla JavaScript (No JS Frameworks used).
+* **Backend Server:** Python & FastAPI (RESTful endpoints).
+* **Database:** SQLite (Engineered using raw SQL queries; strictly no ORMs).
+* **Typography & Icons:** Google Fonts (*Aref Ruqaa* & *Plus Jakarta Sans*) and FontAwesome v6.4.
+* **External API:** Alquran.cloud REST API (Dynamic, synchronized Tajweed audio and Arabic text).
 
 ## 🚀 Quick Start / Local Deployment
 
