@@ -462,7 +462,8 @@
     </div>
 
     <script>
-        let database = JSON.parse(localStorage.getItem('iqra_hifz_db')) || {
+        // --- 1. CORE DATA & BACKEND CONNECTION ---
+        let database = {
             students: [],
             currentRole: null,
             activeUserToken: null
@@ -471,15 +472,39 @@
         let currentActiveTimerInterval = null;
         let globalSelectedRole = null;
 
-        window.onload = function() {
-            renderStudentDatabaseStructures();
+        // On Load: Fetch Data directly from FastAPI backend
+        window.onload = async function() {
+            await syncDatabaseFromBackend();
             populateSurahAssetLibraryIndexes();
             resetGateway();
         };
 
-        function saveState() {
-            localStorage.setItem('iqra_hifz_db', JSON.stringify(database));
-            renderStudentDatabaseStructures();
+        async function syncDatabaseFromBackend() {
+            try {
+                const response = await fetch('http://127.0.0.1:8000/students');
+                if(response.ok) {
+                    database.students = await response.json();
+                    renderStudentDatabaseStructures();
+                }
+            } catch (error) {
+                console.error("Backend server is not running.", error);
+            }
+        }
+
+        // Helper: Saves updates safely without altering main.py
+        async function updateStudentInBackend(student) {
+            try {
+                // Remove old record
+                await fetch(`http://127.0.0.1:8000/students/${student.id}`, {method: 'DELETE'});
+                // Re-insert updated record
+                await fetch(`http://127.0.0.1:8000/students`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(student)
+                });
+            } catch(e) {
+                console.error("Failed to sync update to backend", e);
+            }
         }
 
         // --- GATEWAY SECURITY & LOGOUT ---
@@ -579,31 +604,21 @@
         function openModal(id) { document.getElementById(id).classList.remove('hidden'); }
         function closeModal(id) { document.getElementById(id).classList.add('hidden'); }
 
-        // --- ENROLLMENT ---
-        function handleProfileEnrollmentSubmission(event) {
+        // --- ENROLLMENT (POST to Backend) ---
+        async function handleProfileEnrollmentSubmission(event) {
             event.preventDefault();
             const nameField = document.getElementById('enroll-name').value.trim();
             const pinField = document.getElementById('enroll-pin').value.trim();
 
-            if (!nameField) {
-                alert("Please enter a Legal Name to enroll a student.");
-                return;
-            }
-
-            if (!pinField || pinField.length !== 4 || isNaN(parseInt(pinField, 10))) {
-                alert("Please enter a valid 4-digit numerical password.");
-                return;
-            }
-
-            if (database.students.some(s => s.name.toLowerCase() === nameField.toLowerCase())) {
-                alert("Error: A student profile with this name already exists.");
-                return;
-            }
+            if (!nameField) { alert("Please enter a Legal Name to enroll a student."); return; }
+            if (!pinField || pinField.length !== 4 || isNaN(parseInt(pinField, 10))) { alert("Please enter a valid 4-digit numerical password."); return; }
+            if (database.students.some(s => s.name.toLowerCase() === nameField.toLowerCase())) { alert("Error: A student profile with this name already exists."); return; }
 
             const newStudent = {
                 id: 'std_' + Date.now(),
                 name: nameField,
-                currentJuz: 1, 
+                juz: 1, 
+                currentJuz: 1,
                 sabaq: "Not set",
                 sabqi: "Not set",
                 manzil: "Not set",
@@ -612,13 +627,29 @@
                 logs: []
             };
 
-            database.students.push(newStudent);
-            saveState();
-            closeModal('enroll-modal');
-            
-            document.getElementById('enroll-name').value = '';
-            document.getElementById('enroll-pin').value = '';
-            alert("Success: Profile authenticated. Go to 'Manage Progress' to assign their Sabaq & Juz.");
+            try {
+                const response = await fetch('http://127.0.0.1:8000/students', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(newStudent)
+                });
+
+                if (!response.ok) {
+                    const error = await response.json();
+                    alert("Backend Error: " + error.detail);
+                    return;
+                }
+
+                database.students.push(newStudent);
+                renderStudentDatabaseStructures();
+                closeModal('enroll-modal');
+                
+                document.getElementById('enroll-name').value = '';
+                document.getElementById('enroll-pin').value = '';
+                alert("Success: Profile authenticated. Go to 'Manage Progress' to assign their Sabaq & Juz.");
+            } catch (e) {
+                alert("Error connecting to backend server.");
+            }
         }
 
         // --- MANAGE PROGRESS & DELETE PROFILE ---
@@ -645,7 +676,7 @@
             }
         }
 
-        function handleProgressUpdate(event) {
+        async function handleProgressUpdate(event) {
             event.preventDefault();
             const studentId = document.getElementById('manage-student-select').value;
             const student = database.students.find(s => s.id === studentId);
@@ -658,46 +689,52 @@
                 return;
             }
 
+            student.juz = juzVal;
             student.currentJuz = juzVal;
             student.sabaq = document.getElementById('manage-sabaq').value.trim() || "Not set";
             student.sabqi = document.getElementById('manage-sabqi').value.trim() || "Not set";
             student.manzil = document.getElementById('manage-manzil').value.trim() || "Not set";
 
-            saveState();
+            await updateStudentInBackend(student);
+            renderStudentDatabaseStructures();
             alert(`Progress successfully updated for ${student.name}.`);
         }
 
-        function deleteStudentProfile() {
+        async function deleteStudentProfile() {
             const studentId = document.getElementById('manage-student-select').value;
             if (!studentId) return;
 
-            const student = database.students.find(s => s.id === studentId);
-            if (!student) return;
-
-            const confirmDelete = confirm(`WARNING: Are you absolutely sure you want to permanently delete the profile for "${student.name}"? This action cannot be undone and will erase all their recitation logs.`);
+            const confirmDelete = confirm(`WARNING: Are you sure you want to permanently delete this profile?`);
             
             if (confirmDelete) {
-                // Remove the student from the database completely
-                database.students = database.students.filter(s => s.id !== studentId);
-                saveState();
-                
-                // Clear the manage form view
-                document.getElementById('manage-student-select').value = '';
-                populateManageForm();
+                try {
+                    const response = await fetch(`http://127.0.0.1:8000/students/${studentId}`, {
+                        method: 'DELETE'
+                    });
 
-                // If the deleted student was the actively selected one in the sidebar dropdown, reset it
-                const activeDropdown = document.getElementById('active-student-dropdown');
-                if (activeDropdown.value === studentId) {
-                    activeDropdown.value = '';
-                    changeActiveStudent();
+                    if (response.ok) {
+                        database.students = database.students.filter(s => s.id !== studentId);
+                        
+                        document.getElementById('manage-student-select').value = '';
+                        populateManageForm();
+
+                        const activeDropdown = document.getElementById('active-student-dropdown');
+                        if (activeDropdown.value === studentId) {
+                            activeDropdown.value = '';
+                            changeActiveStudent();
+                        }
+                        
+                        renderStudentDatabaseStructures();
+                        alert("Student profile permanently removed from database.");
+                    }
+                } catch(e) {
+                    alert("Error communicating with backend.");
                 }
-
-                alert("Student profile has been permanently removed.");
             }
         }
 
         // --- EVALUATION LOGGING ---
-        function handleEvaluationLogSubmission(event) {
+        async function handleEvaluationLogSubmission(event) {
             event.preventDefault();
             const studentId = document.getElementById('log-student-select').value;
             const rating = parseInt(document.getElementById('log-fluency').value, 10);
@@ -724,7 +761,9 @@
                     alert("Mubarak! Flawless session recorded. Badge criteria achieved.");
                 }
                 
-                saveState();
+                await updateStudentInBackend(student);
+                renderStudentDatabaseStructures();
+
                 closeModal('progress-modal');
                 document.getElementById('log-notes').value = '';
                 document.getElementById('log-mistakes').value = '0';

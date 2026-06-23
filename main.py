@@ -1,16 +1,14 @@
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from sqlalchemy.orm import Session
-from backend.database import engine, Base, get_db
-from backend import models
-from datetime import date, datetime, timedelta
+from pydantic import BaseModel
+import sqlite3
+import json
 import os
-import re
 
-app = FastAPI(title="Zaryah+ Hifz Engine")
+app = FastAPI()
 
-# Permissive CORS Layer to avoid local network blocks
+# Allows your frontend to talk to your backend safely
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -19,160 +17,97 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize the database automatically on startup
+def get_db_connection():
+    conn = sqlite3.connect("hifz.db")
+    conn.row_factory = sqlite3.Row
+    return conn
+
 @app.on_event("startup")
-def startup_event():
-    Base.metadata.create_all(bind=engine)
+def setup_database():
+    conn = get_db_connection()
+    # Raw SQL table creation per requirements
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS students (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            juz INTEGER NOT NULL,
+            pin TEXT,
+            sabaq TEXT,
+            sabqi TEXT,
+            manzil TEXT,
+            streak INTEGER,
+            logs TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
 
-# Pydantic Schemas for incoming request data validation
-from pydantic import BaseModel
-from typing import List
-
-class StudentCreate(BaseModel):
-    name: str
-
-class ProgressCreate(BaseModel):
-    student_id: int
-    type: str  
-    surah_id: int
-    ayah_from: int
-    ayah_to: int
-    rating: int
-    notes: str = ""
-    mistakes: List[int] = []
-
-# Router paths to serve the frontend interface
+# --- NEW: SERVE FRONTEND ON PORT 8000 ---
 @app.get("/")
-@app.get("/dashboard")
-def read_dashboard_root():
+def serve_frontend():
+    # This tells FastAPI to load your HTML file when you go to localhost:8000
     if os.path.exists("index.html"):
         return FileResponse("index.html")
-    return {"status": "Error", "message": "index.html workspace asset file is missing."}
+    return {"error": "index.html not found in the current directory."}
 
-# --- CORE API ROUTES ---
+# Pydantic Validation Model
+class Student(BaseModel):
+    id: str
+    name: str
+    juz: int
+    pin: str = "1234"
+    sabaq: str = "Not set"
+    sabqi: str = "Not set"
+    manzil: str = "Not set"
+    streak: int = 0
+    logs: list = []
 
-@app.get("/api/students")
-def get_students(db: Session = Depends(get_db)):
-    students = db.query(models.Student).all()
+# Route 1: Get all students
+@app.get("/students")
+def get_all_students():
+    conn = get_db_connection()
+    rows = conn.execute("SELECT * FROM students").fetchall() # Raw SQL
+    conn.close()
+    
+    students = []
+    for row in rows:
+        s_dict = dict(row)
+        # Convert JSON strings back to lists for the frontend
+        s_dict['logs'] = json.loads(s_dict['logs']) if s_dict['logs'] else []
+        s_dict['currentJuz'] = s_dict.pop('juz') # Format for frontend
+        students.append(s_dict)
     return students
 
-@app.get("/api/surahs")
-def get_surahs(db: Session = Depends(get_db)):
-    surahs = db.query(models.Surah).order_by(models.Surah.id).all()
-    return surahs
+# Route 2: Add a student
+@app.post("/students")
+def add_student(student: Student):
+    # Strict Backend Validation: Must not crash the server
+    if not student.name or not student.name.strip():
+        raise HTTPException(status_code=400, detail="Student name cannot be empty.")
+    if student.juz < 1 or student.juz > 30:
+        raise HTTPException(status_code=400, detail="Juz must be between 1 and 30.")
 
-@app.post("/api/students")
-def create_student(student: StudentCreate, db: Session = Depends(get_db)):
-    db_student = models.Student(name=student.name)
-    db.add(db_student)
-    db.commit()
-    db.refresh(db_student)
-    return db_student
-
-@app.delete("/api/students/{id}")
-def delete_student(id: int, db: Session = Depends(get_db)):
-    db_student = db.query(models.Student).filter(models.Student.id == id).first()
-    if not db_student:
-        raise HTTPException(status_code=404, detail="Student not found")
-    db.delete(db_student)
-    db.commit()
-    return {"status": "success"}
-
-@app.post("/api/progress")
-def add_progress(progress: ProgressCreate, db: Session = Depends(get_db)):
-    db_log = models.ProgressLog(
-        student_id=progress.student_id,
-        date=date.today(),
-        type=progress.type,
-        surah_id=progress.surah_id,
-        ayah_from=progress.ayah_from,
-        ayah_to=progress.ayah_to,
-        rating=progress.rating,
-        notes=progress.notes
-    )
-    db.add(db_log)
-    db.flush()  # Flush to get the generated log ID
-
-    for ayah_no in progress.mistakes:
-        db_mistake = models.Mistake(
-            log_id=db_log.id,
-            surah_id=progress.surah_id,
-            ayah_no=ayah_no
+    conn = get_db_connection()
+    try:
+        # Raw SQL INSERT
+        conn.execute(
+            "INSERT INTO students (id, name, juz, pin, sabaq, sabqi, manzil, streak, logs) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (student.id, student.name.strip(), student.juz, student.pin, student.sabaq, student.sabqi, student.manzil, student.streak, json.dumps(student.logs))
         )
-        db.add(db_mistake)
-    
-    db.commit()
-    return {"status": "success", "log_id": db_log.id}
-
-@app.get("/api/students/{id}/dashboard")
-def get_student_dashboard(id: int, db: Session = Depends(get_db)):
-    total_sabaq = db.query(models.ProgressLog).filter(
-        models.ProgressLog.student_id == id,
-        models.ProgressLog.type == 'sabaq'
-    ).count()
-    
-    recent_mistakes_query = db.query(models.Mistake).join(models.ProgressLog).filter(
-        models.ProgressLog.student_id == id
-    ).order_by(models.ProgressLog.date.desc()).limit(10).all()
-
-    formatted_mistakes = [{
-        "surah_no": m.surah_id,
-        "ayah_no": m.ayah_no,
-        "date": m.log.date.isoformat() if m.log.date else None
-    } for m in recent_mistakes_query]
-
-    # Streak calculation based on distinct log dates
-    logs = db.query(models.ProgressLog.date).filter(
-        models.ProgressLog.student_id == id
-    ).distinct().order_by(models.ProgressLog.date.desc()).all()
-    
-    streak = 0
-    if logs:
-        log_dates = {row.date for row in logs}
-        current_check = date.today()
-        if current_check not in log_dates:
-            current_check -= timedelta(days=1)
+        conn.commit()
+    except sqlite3.IntegrityError:
+        raise HTTPException(status_code=400, detail="Student ID already exists.")
+    finally:
+        conn.close()
         
-        while current_check in log_dates:
-            streak += 1
-            current_check -= timedelta(days=1)
+    return {"message": "Student added successfully"}
 
-    return {
-        "total_sabaq": total_sabaq,
-        "streak": streak,
-        "recent_mistakes": formatted_mistakes
-    }
-
-@app.get("/api/students/{id}/analytics")
-def get_student_analytics(id: int, db: Session = Depends(get_db)):
-    # --- Milestone Calculation ---
-    milestones = {
-        "flawless_session": False,
-        "para_completed": False,
-        "hifz_completed": False,
-    }
-
-    # 1. Flawless Session: Check for any log with a 5-star rating or zero associated mistakes.
-    flawless_logs = db.query(models.ProgressLog).filter(models.ProgressLog.student_id == id).all()
-    for log in flawless_logs:
-        if log.rating == 5 or not log.mistakes:
-            milestones["flawless_session"] = True
-            break
-
-    # 2. Para/Hifz Completion: Use student's current Juz from their name as a proxy.
-    student = db.query(models.Student).filter(models.Student.id == id).first()
-    if student and student.name:
-        match = re.search(r'\(Juz (\d+)\)', student.name)
-        if match:
-            current_juz = int(match.group(1))
-            if current_juz > 1:
-                milestones["para_completed"] = True
-            
-            if current_juz >= 30:
-                last_surah_log = db.query(models.ProgressLog).filter(models.ProgressLog.student_id == id, models.ProgressLog.surah_id == 114).first()
-                if last_surah_log:
-                    milestones["hifz_completed"] = True
-    
-    return {
-        "milestones": milestones
-    }
+# Route 3: Delete a student
+@app.delete("/students/{student_id}")
+def remove_student(student_id: str):
+    conn = get_db_connection()
+    # Raw SQL DELETE
+    conn.execute("DELETE FROM students WHERE id = ?", (student_id,))
+    conn.commit()
+    conn.close()
+    return {"message": "Student removed successfully"}
